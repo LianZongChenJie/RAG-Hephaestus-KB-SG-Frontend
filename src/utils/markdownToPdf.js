@@ -125,8 +125,202 @@ const PDF_CSS = `
   </style>
 `
 
+/** 由 columns/rows 构造 HTML 表格（用于 PDF 导出，单元格不换行以便整体等比缩放） */
+function buildTableHtml(columns, rows = []) {
+  const head = columns
+    .map((c) => `<th>${escapeHtml(c.label || c.key)}</th>`)
+    .join('')
+  const body = (rows || [])
+    .map((row) => {
+      // 行数据可能是 {key: value} 对象，也兼容数组形式
+      const tds = columns
+        .map((col, i) => `<td>${escapeHtml(row?.[col.key] ?? row?.[i] ?? '')}</td>`)
+        .join('')
+      return `<tr>${tds}</tr>`
+    })
+    .join('')
+  return `<table class="pdf-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
+}
+
+/** 表格 PDF 专用样式（配合等比缩放） */
+const TABLE_CSS = `
+  <style>
+    .pdf-table-scale-wrap { overflow: hidden; width: 100%; }
+    .pdf-table {
+      width: max-content;        /* 覆盖全局 table{width:100%}，按内容自然宽度撑开 */
+      max-width: none;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin: 8px 0;
+      page-break-inside: auto;
+    }
+    .pdf-table th, .pdf-table td {
+      border: 1px solid #d0d7de;
+      padding: 5px 7px;
+      text-align: left;
+      white-space: nowrap;      /* 不换行，保证按内容自然宽度测量 */
+      vertical-align: top;
+    }
+    .pdf-table th {
+      background: #f5f7fa;
+      font-weight: 600;
+      color: #1f2d3d;
+    }
+  </style>
+`
+
 /**
- * 将 Markdown 内容生成 PDF 并触发浏览器下载
+ * 将 chat-stream 返回的 table 数据（columns/rows）导出为 PDF。
+ * 列多导致表格超出页面宽度时，自动等比例缩小至页宽内。
+ * @param {Array} columns [{key, label}]
+ * @param {Array} rows 数据行
+ * @param {string} filename 下载文件名（不含 .pdf 后缀）
+ * @param {string} [title] PDF 内的表格标题（可选）
+ */
+export async function downloadTableAsPdf(columns, rows = [], filename = '数据表', title = '') {
+  if (!columns?.length) return
+  const { default: html2pdf } = await import('html2pdf.js')
+
+  const titleHtml = title
+    ? `<h2 style="margin:0 0 6px;font-size:18px;color:#1f2328;">${escapeHtml(title)}</h2>`
+    : ''
+  const tableHtml = buildTableHtml(columns, rows)
+
+  const container = document.createElement('div')
+  container.style.cssText =
+    'position:fixed;left:-10000px;top:0;width:730px;background:#fff;'
+  container.innerHTML = `${PDF_CSS}${TABLE_CSS}<div class="md-pdf-body">${titleHtml}<div class="pdf-table-scale-wrap">${tableHtml}</div></div>`
+  document.body.appendChild(container)
+
+  // 测量表格自然宽度；超出 PDF 内容区宽度时等比缩小
+  const table = container.querySelector('table.pdf-table')
+  const wrap = container.querySelector('.pdf-table-scale-wrap')
+  const naturalWidth = table.offsetWidth
+  const availWidth = 730 // 与容器宽度一致（A4 内容区）
+  if (naturalWidth > availWidth && naturalWidth > 0) {
+    const scale = availWidth / naturalWidth
+    const naturalHeight = table.offsetHeight
+    table.style.transform = `scale(${scale})`
+    table.style.transformOrigin = 'top left'
+    // transform 不改变布局尺寸，手动把包裹层压到缩放后的高度
+    wrap.style.width = `${availWidth}px`
+    wrap.style.height = `${Math.ceil(naturalHeight * scale)}px`
+  }
+
+  const safeName = (filename || '数据表').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
+
+  try {
+    await html2pdf()
+      .set({
+        margin: [18, 18, 20, 18],
+        filename: `${safeName}.pdf`,
+        image: { type: 'jpeg', quality: 0.96 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          windowWidth: 766,
+        },
+        jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      })
+      .from(container.querySelector('.md-pdf-body'))
+      .save()
+  } finally {
+    if (container.parentNode) document.body.removeChild(container)
+  }
+}
+
+/**
+ * 将图表（echarts 导出的图片 dataURL）导出为 PDF
+ * @param {string} imageDataUrl echarts getDataURL 得到的图片地址
+ * @param {string} filename 下载文件名（不含 .pdf 后缀）
+ * @param {string} [title] PDF 内的图表标题（可选）
+ */
+export async function downloadChartAsPdf(imageDataUrl, filename = '图表', title = '') {
+  const { default: html2pdf } = await import('html2pdf.js')
+
+  const titleHtml = title
+    ? `<h2 style="margin:0 0 12px;font-size:20px;color:#1f2328;">${escapeHtml(title)}</h2>`
+    : ''
+
+  const container = document.createElement('div')
+  container.style.cssText =
+    'position:fixed;left:-10000px;top:0;width:730px;background:#fff;'
+  container.innerHTML = `${PDF_CSS}<div class="md-pdf-body">${titleHtml}<img src="${imageDataUrl}" style="width:100%;display:block;" /></div>`
+  document.body.appendChild(container)
+
+  const safeName = (filename || '图表').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
+
+  try {
+    await html2pdf()
+      .set({
+        margin: [18, 18, 20, 18],
+        filename: `${safeName}.pdf`,
+        image: { type: 'jpeg', quality: 0.96 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          windowWidth: 766,
+        },
+        jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
+      })
+      .from(container.querySelector('.md-pdf-body'))
+      .save()
+  } finally {
+    if (container.parentNode) document.body.removeChild(container)
+  }
+}
+
+/** 简单 HTML 转义，防止标题中的特殊字符破坏 HTML 结构 */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]))
+}
+
+/**
+ * 通用：让容器内所有超宽表格等比缩小到 availWidth 内。
+ * 用于 Markdown 渲染出的 <table>（含 AI 回复中的 markdown 表格）。
+ * @param {HTMLElement} container 已插入 DOM 的容器
+ * @param {number} availWidth 可用宽度（px）
+ */
+function fitWideTables(container, availWidth) {
+  container.querySelectorAll('table').forEach((table) => {
+    if (table.classList.contains('pdf-table')) return // 表格导出已单独处理
+    // 先按内容自然宽度测量（覆盖 CSS 里的 width:100%）
+    const prevWidth = table.style.width
+    table.style.width = 'max-content'
+    let natural = table.offsetWidth
+    if (natural <= availWidth) {
+      table.style.width = prevWidth // 不超宽，还原
+      return
+    }
+    // 禁止换行后重新测量（不换行才能得到最小自然宽度）
+    table.querySelectorAll('th, td').forEach((c) => { c.style.whiteSpace = 'nowrap' })
+    natural = table.offsetWidth
+    if (natural <= availWidth || natural <= 0) {
+      table.style.width = prevWidth
+      return
+    }
+    const scale = availWidth / natural
+    const naturalHeight = table.offsetHeight
+    table.style.transform = `scale(${scale})`
+    table.style.transformOrigin = 'top left'
+    // 包一层固定尺寸容器，修正 transform 不改变布局的问题
+    const wrap = document.createElement('div')
+    wrap.style.cssText =
+      `overflow:hidden;width:${availWidth}px;height:${Math.ceil(naturalHeight * scale)}px;`
+    table.parentNode.insertBefore(wrap, table)
+    wrap.appendChild(table)
+  })
+}
+
+/**
+ * 将 Markdown 内容生成 PDF 并触发浏览器下载。
+ * 内容中的 markdown 表格会被渲染为真正的表格；超出页宽时等比缩小。
  * @param {string} markdown 原始 Markdown 文本
  * @param {string} filename 下载文件名（不含 .pdf 后缀）
  * @returns {Promise<void>}
@@ -142,6 +336,9 @@ export async function downloadMarkdownAsPdf(markdown, filename = 'AI回复') {
     'position:fixed;left:-10000px;top:0;width:730px;background:#fff;'
   container.innerHTML = `${PDF_CSS}<div class="md-pdf-body">${html}</div>`
   document.body.appendChild(container)
+
+  // markdown 表格超宽时等比缩放
+  fitWideTables(container, 730)
 
   const safeName = (filename || 'AI回复').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
 

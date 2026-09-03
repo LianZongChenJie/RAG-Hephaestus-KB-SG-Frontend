@@ -2,14 +2,20 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
+import * as echarts from 'echarts'
 import 'highlight.js/styles/github.css'
 import { ElMessage } from 'element-plus'
-import { Promotion, VideoPause, Document } from '@element-plus/icons-vue'
+import { Promotion, VideoPause, Download } from '@element-plus/icons-vue'
 import { useChatStore } from '../stores/chatStore'
 import SettingPanel from './SettingPanel.vue'
 import ResultTable from './ResultTable.vue'
 import ResultChart from './ResultChart.vue'
-import { downloadMarkdownAsPdf, looksLikeMarkdown } from '../utils/markdownToPdf'
+import {
+  downloadMarkdownAsPdf,
+  downloadTableAsPdf,
+  downloadChartAsPdf,
+  looksLikeMarkdown,
+} from '../utils/markdownToPdf'
 
 const store = useChatStore()
 const input = ref('')
@@ -53,9 +59,9 @@ function tableToMarkdown(table) {
   // 表头：取 label
   const header = '| ' + columns.map(c => c.label || c.key).join(' | ') + ' |'
   const separator = '| ' + columns.map(() => '---').join(' | ') + ' |'
-  // 数据行
+  // 数据行（兼容 {key: value} 对象与数组两种形式）
   const dataRows = rows.map(row => {
-    const vals = columns.map(col => (row[col] ?? row[columns.indexOf(col)] ?? '') ?? '')
+    const vals = columns.map((col, i) => (row?.[col.key] ?? row?.[i] ?? '') ?? '')
     return '| ' + vals.join(' | ') + ' |'
   })
   return '\n\n' + header + '\n' + separator + '\n' + dataRows.join('\n') + '\n'
@@ -66,23 +72,45 @@ async function downloadPdf(msg, index) {
   const parts = []
   if (msg?.content) parts.push(msg.content)
   if (msg?.table?.columns?.length) {
-    // 调试：打印 table 数据结构
-    console.log('=== PDF 导出 - Table 数据结构 ===')
-    console.log('msg.table:', JSON.stringify(msg.table, null, 2))
-    console.log('columns:', msg.table.columns)
-    console.log('rows (前3条):', msg.table.rows?.slice(0, 3))
-    console.log('rows[0] type:', typeof msg.table.rows?.[0], Array.isArray(msg.table.rows?.[0]))
-    if (msg.table.rows?.[0]) {
-      console.log('rows[0]:', msg.table.rows[0])
-      console.log('rows[0] keys:', Object.keys(msg.table.rows[0]))
-    }
-    console.log('=====================================')
     parts.push(tableToMarkdown(msg.table))
   }
   if (!parts.length) return
   const filename = store.currentSession?.title || `AI回复_${index + 1}`
   try {
     await downloadMarkdownAsPdf(parts.join('\n\n'), filename)
+    ElMessage.success('PDF 已开始下载')
+  } catch (err) {
+    ElMessage.error('导出失败：' + (err.message || '未知错误'))
+  }
+}
+
+/** 导出 chat-stream 返回的 table 数据为 PDF */
+async function downloadTablePdf(msg, index) {
+  if (!msg?.table?.columns?.length) return
+  const base = store.currentSession?.title || `AI回复_${index + 1}`
+  try {
+    await downloadTableAsPdf(msg.table.columns, msg.table.rows || [], `${base}_数据表`, base)
+    ElMessage.success('PDF 已开始下载')
+  } catch (err) {
+    ElMessage.error('导出失败：' + (err.message || '未知错误'))
+  }
+}
+
+/** 导出 chat-stream 返回的 chart 图表为 PDF（截取 echarts 渲染结果） */
+async function downloadChartPdf(msg, index) {
+  if (!msg?.chart?.option) return
+  const base = store.currentSession?.title || `AI回复_${index + 1}`
+  try {
+    const root = listRef.value
+    const canvas = root?.querySelector(`[data-chart-index="${index}"] .result-chart__canvas`)
+    const chart = canvas ? echarts.getInstanceByDom(canvas) : null
+    if (!chart) {
+      ElMessage.warning('图表尚未渲染完成，请稍后重试')
+      return
+    }
+    const dataUrl = chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+    const chartTitle = msg.chart.option?.title?.text || base
+    await downloadChartAsPdf(dataUrl, `${base}_图表`, chartTitle)
     ElMessage.success('PDF 已开始下载')
   } catch (err) {
     ElMessage.error('导出失败：' + (err.message || '未知错误'))
@@ -262,12 +290,37 @@ onUnmounted(() => {
             :columns="msg.table.columns"
             :rows="msg.table.rows || []"
           />
+          <a
+            v-if="msg.role === 'assistant' && msg.table?.columns?.length && !isStreamingAssistant(index)"
+            class="pdf-link"
+            href="javascript:void(0)"
+            title="将表格导出为 PDF"
+            @click.prevent="downloadTablePdf(msg, index)"
+          >
+            <el-icon><Download /></el-icon>
+            下载 PDF
+          </a>
 
-          <ResultChart
+          <div
             v-if="msg.role === 'assistant' && msg.chart?.option"
-            :chart-id="msg.chart.chartId"
-            :option="msg.chart.option"
-          />
+            class="chart-wrap"
+            :data-chart-index="index"
+          >
+            <ResultChart
+              :chart-id="msg.chart.chartId"
+              :option="msg.chart.option"
+            />
+            <a
+              v-if="!isStreamingAssistant(index)"
+              class="pdf-link"
+              href="javascript:void(0)"
+              title="将图表导出为 PDF"
+              @click.prevent="downloadChartPdf(msg, index)"
+            >
+              <el-icon><Download /></el-icon>
+              下载 PDF
+            </a>
+          </div>
 
           <div
             v-if="msg.role === 'assistant' && isStreamingAssistant(index) && msg.content"
@@ -277,16 +330,17 @@ onUnmounted(() => {
             v-else-if="msg.role === 'assistant' && msg.content"
             class="md-body-wrap"
           >
-            <button
-              class="pdf-btn"
-              title="导出为 PDF"
-              :disabled="store.isGenerating"
-              @click="downloadPdf(msg, index)"
-            >
-              <el-icon><Document /></el-icon>
-              导出 PDF
-            </button>
             <div class="md-body" v-html="renderMarkdown(msg.content)" />
+            <a
+              v-if="!isStreamingAssistant(index) && looksLikeMarkdown(msg.content)"
+              class="pdf-link"
+              href="javascript:void(0)"
+              :title="`下载 PDF：${store.currentSession?.title || 'AI回复'}`"
+              @click.prevent="downloadPdf(msg, index)"
+            >
+              <el-icon><Download /></el-icon>
+              下载 PDF
+            </a>
           </div>
 
           <div
@@ -480,32 +534,29 @@ onUnmounted(() => {
   position: relative;
   margin-top: 10px;
 }
-.pdf-btn {
-  position: absolute;
-  top: -2px;
-  right: 8px;
+.chart-wrap {
+  margin-top: 12px;
+  width: 100%;
+}
+.chart-wrap .result-chart {
+  margin-top: 0;
+}
+.pdf-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  appearance: none;
-  border: 1px solid #dcdfe6;
-  background: #fff;
-  color: #606266;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  z-index: 1;
-}
-.pdf-btn:hover:not(:disabled) {
+  margin-top: 12px;
   color: #409eff;
-  border-color: #409eff;
-  background: #ecf5ff;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.2s ease;
 }
-.pdf-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.pdf-link:hover {
+  color: #66b1ff;
+}
+.pdf-link .el-icon {
+  font-size: 14px;
 }
 .stream-cursor {
   display: inline-block;
