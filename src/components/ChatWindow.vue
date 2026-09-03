@@ -50,8 +50,8 @@ function renderMarkdown(content) {
 function tableToMarkdown(table) {
   if (!table?.columns?.length) return ''
   const { columns, rows = [] } = table
-  // 表头
-  const header = '| ' + columns.join(' | ') + ' |'
+  // 表头：取 label
+  const header = '| ' + columns.map(c => c.label || c.key).join(' | ') + ' |'
   const separator = '| ' + columns.map(() => '---').join(' | ') + ' |'
   // 数据行
   const dataRows = rows.map(row => {
