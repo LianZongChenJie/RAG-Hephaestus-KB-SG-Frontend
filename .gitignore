@@ -1,2 +1,4 @@
 ._*
+dist
+dist/*
 node_modules
