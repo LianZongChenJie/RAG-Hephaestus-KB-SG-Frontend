@@ -4,10 +4,12 @@ import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
 import { ElMessage } from 'element-plus'
-import { Promotion, VideoPause, Download } from '@element-plus/icons-vue'
+import { Promotion, VideoPause, Document } from '@element-plus/icons-vue'
 import { useChatStore } from '../stores/chatStore'
-import { looksLikeMarkdown, downloadMarkdownAsPdf, preprocessMarkdown } from '../utils/markdownToPdf'
 import SettingPanel from './SettingPanel.vue'
+import ResultTable from './ResultTable.vue'
+import ResultChart from './ResultChart.vue'
+import { downloadMarkdownAsPdf, looksLikeMarkdown } from '../utils/markdownToPdf'
 
 const store = useChatStore()
 const input = ref('')
@@ -41,31 +43,49 @@ function streamingText(msg) {
 
 function renderMarkdown(content) {
   if (!content) return ''
-  // 整体被 ```markdown 围栏包裹时先解包，避免显示/导出原始代码
-  return marked.parse(preprocessMarkdown(content))
+  return marked.parse(content)
 }
 
-/** 是否展示「下载 PDF」链接：assistant 消息已生成完毕，且内容含 Markdown 格式 */
-function showPdfLink(msg, index) {
-  if (msg?.role !== 'assistant') return false
-  if (isStreamingAssistant(index)) return false
-  return looksLikeMarkdown(msg.content)
+/** 将 msg.table 数据转为 Markdown 表格字符串 */
+function tableToMarkdown(table) {
+  if (!table?.columns?.length) return ''
+  const { columns, rows = [] } = table
+  // 表头
+  const header = '| ' + columns.join(' | ') + ' |'
+  const separator = '| ' + columns.map(() => '---').join(' | ') + ' |'
+  // 数据行
+  const dataRows = rows.map(row => {
+    const vals = columns.map(col => (row[col] ?? row[columns.indexOf(col)] ?? '') ?? '')
+    return '| ' + vals.join(' | ') + ' |'
+  })
+  return '\n\n' + header + '\n' + separator + '\n' + dataRows.join('\n') + '\n'
 }
 
-/** 正在生成 PDF 的消息下标，用于按钮 loading 态 */
-const pdfLoadingIndex = ref(-1)
-
+/** 导出 AI 回复为 PDF（包含文本 + 表格） */
 async function downloadPdf(msg, index) {
-  if (pdfLoadingIndex.value !== -1) return
-  pdfLoadingIndex.value = index
+  const parts = []
+  if (msg?.content) parts.push(msg.content)
+  if (msg?.table?.columns?.length) {
+    // 调试：打印 table 数据结构
+    console.log('=== PDF 导出 - Table 数据结构 ===')
+    console.log('msg.table:', JSON.stringify(msg.table, null, 2))
+    console.log('columns:', msg.table.columns)
+    console.log('rows (前3条):', msg.table.rows?.slice(0, 3))
+    console.log('rows[0] type:', typeof msg.table.rows?.[0], Array.isArray(msg.table.rows?.[0]))
+    if (msg.table.rows?.[0]) {
+      console.log('rows[0]:', msg.table.rows[0])
+      console.log('rows[0] keys:', Object.keys(msg.table.rows[0]))
+    }
+    console.log('=====================================')
+    parts.push(tableToMarkdown(msg.table))
+  }
+  if (!parts.length) return
+  const filename = store.currentSession?.title || `AI回复_${index + 1}`
   try {
-    const title = store.currentSession?.title || 'AI回复'
-    await downloadMarkdownAsPdf(msg.content, title)
-    ElMessage.success('PDF 已生成并下载')
-  } catch {
-    ElMessage.error('PDF 生成失败，请重试')
-  } finally {
-    pdfLoadingIndex.value = -1
+    await downloadMarkdownAsPdf(parts.join('\n\n'), filename)
+    ElMessage.success('PDF 已开始下载')
+  } catch (err) {
+    ElMessage.error('导出失败：' + (err.message || '未知错误'))
   }
 }
 
@@ -150,6 +170,25 @@ function clearInput() {
   input.value = ''
 }
 
+const SUGGEST_TAGS = [
+  { label: '设备信息', prompt: '请查看并介绍设备信息' },
+  { label: '设备统计', prompt: '设备统计' },
+  { label: '告警分析', prompt: '告警分析' },
+  { label: '场馆信息', prompt: '场馆信息' },
+  { label: '停车数据', prompt: '停车数据' },
+  { label: '照明管理', prompt: '照明管理' },
+  { label: 'AI报告', prompt: 'AI报告' }
+]
+
+async function useSuggest(tag) {
+  if (store.isGenerating) return
+  input.value = ''
+  await store.sendMessage(tag.prompt, {
+    onError: (msg) => ElMessage.error(msg),
+  })
+  scrollToBottom()
+}
+
 function onMediaChange(e) {
   store.setSidebarCollapsed(e.matches)
 }
@@ -177,7 +216,18 @@ onUnmounted(() => {
     <div ref="listRef" class="message-list">
       <div v-if="!messages.length" class="empty">
         <p>有什么我能帮你的吗？</p>
-        <p class="hint">我是Hephaestus,我能做到多轮上下文对话，Enter 发送，Shift+Enter 换行</p>
+        <p class="hint">我是 Hephaestus，支持多轮上下文。Enter 发送，Shift+Enter 换行</p>
+        <p class="suggest-label">试试这些快捷查询</p>
+        <div class="suggest-tags">
+          <button
+            v-for="tag in SUGGEST_TAGS"
+            :key="tag.label"
+            type="button"
+            class="suggest-tag"
+            :disabled="store.isGenerating"
+            @click="useSuggest(tag)"
+          >{{ tag.label }}</button>
+        </div>
       </div>
 
       <div
@@ -186,33 +236,61 @@ onUnmounted(() => {
         class="message-row"
         :class="msg.role"
       >
-        <div class="bubble">
+        <div class="bubble" :class="{ wide: msg.table || msg.chart }">
           <div v-if="msg.role === 'assistant'" class="role-label">AI</div>
+
+          <div
+            v-if="msg.role === 'assistant' && msg.status && isStreamingAssistant(index)"
+            class="status-text"
+          >{{ msg.status }}</div>
+
+          <div
+            v-if="msg.role === 'assistant' && msg.sql"
+            class="sql-block"
+          >
+            <div class="sql-label">SQL</div>
+            <pre><code>{{ msg.sql }}</code></pre>
+          </div>
+
           <div
             v-if="msg.role === 'user'"
             class="user-text"
           >{{ msg.content }}</div>
-          <div
-            v-else-if="isStreamingAssistant(index)"
-            class="md-body stream-live"
-          ><div v-html="renderMarkdown(streamingText(msg))" /><span class="stream-cursor" aria-hidden="true" /></div>
-          <div
-            v-else
-            class="md-body"
-            v-html="renderMarkdown(msg.content)"
+
+          <ResultTable
+            v-if="msg.role === 'assistant' && msg.table?.columns?.length"
+            :columns="msg.table.columns"
+            :rows="msg.table.rows || []"
           />
-          <a
-            v-if="showPdfLink(msg, index)"
-            class="pdf-download-link"
-            :class="{ loading: pdfLoadingIndex === index }"
-            href="javascript:void(0)"
-            @click="downloadPdf(msg, index)"
-          >
-            <el-icon><Download /></el-icon>
-            {{ pdfLoadingIndex === index ? 'PDF 生成中…' : '下载 PDF' }}
-          </a>
+
+          <ResultChart
+            v-if="msg.role === 'assistant' && msg.chart?.option"
+            :chart-id="msg.chart.chartId"
+            :option="msg.chart.option"
+          />
+
           <div
-            v-if="msg.role === 'assistant' && store.isGenerating && index === messages.length - 1 && !msg.content"
+            v-if="msg.role === 'assistant' && isStreamingAssistant(index) && msg.content"
+            class="stream-text"
+          >{{ streamingText(msg) }}<span class="stream-cursor" aria-hidden="true" /></div>
+          <div
+            v-else-if="msg.role === 'assistant' && msg.content"
+            class="md-body-wrap"
+          >
+            <button
+              class="pdf-btn"
+              title="导出为 PDF"
+              :disabled="store.isGenerating"
+              @click="downloadPdf(msg, index)"
+            >
+              <el-icon><Document /></el-icon>
+              导出 PDF
+            </button>
+            <div class="md-body" v-html="renderMarkdown(msg.content)" />
+          </div>
+
+          <div
+            v-if="msg.role === 'assistant' && store.isGenerating && index === messages.length - 1 && !msg.content && !msg.table && !msg.chart"
             class="typing"
           >
             <span /><span /><span />
@@ -293,6 +371,38 @@ onUnmounted(() => {
   font-size: 13px;
   margin-top: 8px;
 }
+.suggest-label {
+  margin: 28px 0 12px;
+  font-size: 13px;
+  color: #c0c4cc;
+}
+.suggest-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+.suggest-tag {
+  appearance: none;
+  border: 1px solid #dcdfe6;
+  background: #fff;
+  color: #409eff;
+  font-size: 13px;
+  line-height: 1;
+  padding: 10px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.suggest-tag:hover:not(:disabled) {
+  border-color: #409eff;
+  background: #ecf5ff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.12);
+}
+.suggest-tag:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 .message-row {
   display: flex;
   margin-bottom: 16px;
@@ -310,6 +420,9 @@ onUnmounted(() => {
   line-height: 1.6;
   font-size: 15px;
 }
+.bubble.wide {
+  max-width: min(960px, 96%);
+}
 .message-row.user .bubble {
   background: #409eff;
   color: #fff;
@@ -325,6 +438,31 @@ onUnmounted(() => {
   color: #909399;
   margin-bottom: 6px;
 }
+.status-text {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 8px;
+}
+.sql-block {
+  margin-bottom: 10px;
+  background: #1e1e1e;
+  color: #dcdcdc;
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.sql-label {
+  font-size: 11px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+.sql-block pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+}
 .user-text {
   white-space: pre-wrap;
   word-break: break-word;
@@ -333,6 +471,41 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   min-height: 1.2em;
+  margin-top: 10px;
+}
+.md-body {
+  margin-top: 10px;
+}
+.md-body-wrap {
+  position: relative;
+  margin-top: 10px;
+}
+.pdf-btn {
+  position: absolute;
+  top: -2px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  appearance: none;
+  border: 1px solid #dcdfe6;
+  background: #fff;
+  color: #606266;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  z-index: 1;
+}
+.pdf-btn:hover:not(:disabled) {
+  color: #409eff;
+  border-color: #409eff;
+  background: #ecf5ff;
+}
+.pdf-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .stream-cursor {
   display: inline-block;
@@ -416,53 +589,5 @@ onUnmounted(() => {
 }
 .copy-code-btn:hover {
   background: rgba(255, 255, 255, 0.25);
-}
-/* Markdown 表格 - 与 UI 图一致：带边框、表头突出 */
-.md-body table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 12px 0;
-  font-size: 14px;
-  line-height: 1.5;
-  color: #303133;
-  background: #fff;
-}
-.md-body thead {
-  background: #f5f7fa;
-}
-.md-body th,
-.md-body td {
-  border: 1px solid #e4e7ed;
-  padding: 12px 16px;
-  text-align: left;
-  vertical-align: top;
-}
-.md-body th {
-  font-weight: 600;
-  color: #1f2d3d;
-  background: #f5f7fa;
-}
-/* 下载 PDF 链接 */
-.pdf-download-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--el-border-color-lighter, #e4e7ed);
-  width: 100%;
-  font-size: 13px;
-  color: var(--el-color-primary, #409eff);
-  text-decoration: none;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-.pdf-download-link:hover {
-  opacity: 0.8;
-}
-.pdf-download-link.loading {
-  opacity: 0.55;
-  cursor: wait;
-  pointer-events: none;
 }
 </style>

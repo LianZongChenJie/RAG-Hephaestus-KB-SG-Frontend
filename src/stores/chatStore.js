@@ -30,6 +30,12 @@ function loadPersisted() {
   }
 }
 
+function patchAssistant(session, index, partial) {
+  const msg = session.messages[index]
+  if (!msg) return
+  Object.assign(msg, partial)
+}
+
 export const useChatStore = defineStore('chat', {
   state: () => {
     const defaultSettings = { temperature: 0.6, num_ctx: 2048 }
@@ -148,7 +154,14 @@ export const useChatStore = defineStore('chat', {
       this.persist()
 
       // 必须通过 messages 数组下标改 content，才能触发 Vue 响应式流式刷新
-      session.messages.push({ role: 'assistant', content: '' })
+      session.messages.push({
+        role: 'assistant',
+        content: '',
+        status: '',
+        sql: '',
+        table: null,
+        chart: null,
+      })
       const assistantIndex = session.messages.length - 1
 
       this.isGenerating = true
@@ -167,7 +180,7 @@ export const useChatStore = defineStore('chat', {
 
       const messagesForApi = session.messages
         .slice(0, -1)
-        .map(({ role, content }) => ({ role, content }))
+        .map(({ role, content }) => ({ role, content: content || '' }))
 
       await streamChat({
         messages: messagesForApi,
@@ -177,6 +190,27 @@ export const useChatStore = defineStore('chat', {
         onToken: (chunk) => {
           typewriter.push(chunk)
         },
+        onMode: ({ message }) => {
+          if (message) {
+            patchAssistant(session, assistantIndex, { status: message })
+            this.streamTick += 1
+          }
+        },
+        onSql: (sql) => {
+          patchAssistant(session, assistantIndex, { sql })
+          this.streamTick += 1
+        },
+        onTable: (table) => {
+          patchAssistant(session, assistantIndex, { table })
+          this.streamTick += 1
+        },
+        onChart: (chart) => {
+          patchAssistant(session, assistantIndex, { chart })
+          this.streamTick += 1
+        },
+        onSummary: (summary) => {
+          typewriter.push(summary)
+        },
         onDone: () => {
           const tw = this._typewriter
           if (!tw) return
@@ -185,8 +219,12 @@ export const useChatStore = defineStore('chat', {
             this.isGenerating = false
             this._abortController = null
             const msg = session.messages[assistantIndex]
-            if (msg && !msg.content.trim()) {
-              msg.content = '（已停止或无内容返回）'
+            if (msg) {
+              msg.status = ''
+              const hasStructured = !!(msg.table || msg.chart)
+              if (!msg.content.trim() && !hasStructured) {
+                msg.content = '（已停止或无内容返回）'
+              }
             }
             this._touchSession(session)
             this.persist()
@@ -194,19 +232,26 @@ export const useChatStore = defineStore('chat', {
         },
         onError: (errMsg) => {
           const tw = this._typewriter
-          if (!tw) return
-          tw.finish(() => {
+          const finish = () => {
             this._typewriter = null
             this.isGenerating = false
             this._abortController = null
             const msg = session.messages[assistantIndex]
             if (msg) {
-              msg.content = msg.content || `错误：${errMsg}`
+              msg.status = ''
+              if (!msg.content.trim()) {
+                msg.content = `错误：${errMsg}`
+              }
             }
             onError?.(errMsg)
             this._touchSession(session)
             this.persist()
-          })
+          }
+          if (!tw) {
+            finish()
+            return
+          }
+          tw.finish(finish)
         },
       })
 
