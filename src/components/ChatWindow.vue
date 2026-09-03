@@ -4,8 +4,9 @@ import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github.css'
 import { ElMessage } from 'element-plus'
-import { Promotion, VideoPause } from '@element-plus/icons-vue'
+import { Promotion, VideoPause, Download } from '@element-plus/icons-vue'
 import { useChatStore } from '../stores/chatStore'
+import { looksLikeMarkdown, downloadMarkdownAsPdf, preprocessMarkdown } from '../utils/markdownToPdf'
 import SettingPanel from './SettingPanel.vue'
 
 const store = useChatStore()
@@ -40,7 +41,32 @@ function streamingText(msg) {
 
 function renderMarkdown(content) {
   if (!content) return ''
-  return marked.parse(content)
+  // 整体被 ```markdown 围栏包裹时先解包，避免显示/导出原始代码
+  return marked.parse(preprocessMarkdown(content))
+}
+
+/** 是否展示「下载 PDF」链接：assistant 消息已生成完毕，且内容含 Markdown 格式 */
+function showPdfLink(msg, index) {
+  if (msg?.role !== 'assistant') return false
+  if (isStreamingAssistant(index)) return false
+  return looksLikeMarkdown(msg.content)
+}
+
+/** 正在生成 PDF 的消息下标，用于按钮 loading 态 */
+const pdfLoadingIndex = ref(-1)
+
+async function downloadPdf(msg, index) {
+  if (pdfLoadingIndex.value !== -1) return
+  pdfLoadingIndex.value = index
+  try {
+    const title = store.currentSession?.title || 'AI回复'
+    await downloadMarkdownAsPdf(msg.content, title)
+    ElMessage.success('PDF 已生成并下载')
+  } catch {
+    ElMessage.error('PDF 生成失败，请重试')
+  } finally {
+    pdfLoadingIndex.value = -1
+  }
 }
 
 function enhanceCodeBlocks() {
@@ -168,13 +194,23 @@ onUnmounted(() => {
           >{{ msg.content }}</div>
           <div
             v-else-if="isStreamingAssistant(index)"
-            class="stream-text"
-          >{{ streamingText(msg) }}<span class="stream-cursor" aria-hidden="true" /></div>
+            class="md-body stream-live"
+          ><div v-html="renderMarkdown(streamingText(msg))" /><span class="stream-cursor" aria-hidden="true" /></div>
           <div
             v-else
             class="md-body"
             v-html="renderMarkdown(msg.content)"
           />
+          <a
+            v-if="showPdfLink(msg, index)"
+            class="pdf-download-link"
+            :class="{ loading: pdfLoadingIndex === index }"
+            href="javascript:void(0)"
+            @click="downloadPdf(msg, index)"
+          >
+            <el-icon><Download /></el-icon>
+            {{ pdfLoadingIndex === index ? 'PDF 生成中…' : '下载 PDF' }}
+          </a>
           <div
             v-if="msg.role === 'assistant' && store.isGenerating && index === messages.length - 1 && !msg.content"
             class="typing"
@@ -380,5 +416,53 @@ onUnmounted(() => {
 }
 .copy-code-btn:hover {
   background: rgba(255, 255, 255, 0.25);
+}
+/* Markdown 表格 - 与 UI 图一致：带边框、表头突出 */
+.md-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #303133;
+  background: #fff;
+}
+.md-body thead {
+  background: #f5f7fa;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid #e4e7ed;
+  padding: 12px 16px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-body th {
+  font-weight: 600;
+  color: #1f2d3d;
+  background: #f5f7fa;
+}
+/* 下载 PDF 链接 */
+.pdf-download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--el-border-color-lighter, #e4e7ed);
+  width: 100%;
+  font-size: 13px;
+  color: var(--el-color-primary, #409eff);
+  text-decoration: none;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.pdf-download-link:hover {
+  opacity: 0.8;
+}
+.pdf-download-link.loading {
+  opacity: 0.55;
+  cursor: wait;
+  pointer-events: none;
 }
 </style>
