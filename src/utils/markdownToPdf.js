@@ -363,3 +363,121 @@ export async function downloadMarkdownAsPdf(markdown, filename = 'AI回复') {
     if (container.parentNode) document.body.removeChild(container)
   }
 }
+
+/**
+ * 合并导出：将文本、表格、图表等内容合并到一个PDF中
+ * @param {Object} options 导出选项
+ * @param {string} options.text Markdown 文本内容
+ * @param {Array} options.tables 表格数组 [{columns, rows, title}]
+ * @param {Array} options.charts 图表数组 [{imageDataUrl, title}]
+ * @param {string} options.filename 下载文件名（不含 .pdf 后缀）
+ * @returns {Promise<void>}
+ */
+export async function downloadCombinedAsPdf({ text = '', tables = [], charts = [], filename = 'AI回复_合并导出' }) {
+  const { default: html2pdf } = await import('html2pdf.js')
+
+  // 构建合并的HTML内容
+  let html = ''
+
+  // 添加文本内容
+  if (text && text.trim()) {
+    const processedText = preprocessMarkdown(text)
+    const textHtml = marked.parse(processedText)
+    html += `<div class="combined-section">${textHtml}</div>`
+  }
+
+  // 添加表格
+  tables.forEach((table, index) => {
+    const title = table.title || `数据表 ${index + 1}`
+    const tableHtml = buildTableHtml(table.columns, table.rows || [])
+    html += `
+      <div class="combined-section combined-table-section">
+        <h2>${escapeHtml(title)}</h2>
+        <div class="pdf-table-scale-wrap" data-table-index="${index}">${tableHtml}</div>
+      </div>
+    `
+  })
+
+  // 添加图表
+  charts.forEach((chart, index) => {
+    const title = chart.title || `图表 ${index + 1}`
+    html += `
+      <div class="combined-section combined-chart-section">
+        <h2>${escapeHtml(title)}</h2>
+        <img src="${chart.imageDataUrl}" style="width:100%;display:block;" />
+      </div>
+    `
+  })
+
+  // 如果没有任何内容，直接返回
+  if (!html.trim()) {
+    throw new Error('没有可导出的内容')
+  }
+
+  const container = document.createElement('div')
+  container.style.cssText = 'position:fixed;left:-10000px;top:0;width:730px;background:#fff;'
+  container.innerHTML = `${PDF_CSS}${TABLE_CSS}
+    <style>
+      .combined-section { margin: 16px 0; }
+      .combined-section:first-child { margin-top: 0; }
+      .combined-table-section h2,
+      .combined-chart-section h2 {
+        margin: 0 0 12px;
+        font-size: 18px;
+        color: #1f2328;
+        border-bottom: 1px solid #eaeef2;
+        padding-bottom: 8px;
+      }
+      .combined-chart-section {
+        page-break-inside: avoid;
+      }
+    </style>
+    <div class="md-pdf-body">${html}</div>
+  `
+  document.body.appendChild(container)
+
+  // 专门处理合并导出中的表格等比例缩放
+  container.querySelectorAll('.pdf-table-scale-wrap').forEach((wrap) => {
+    const table = wrap.querySelector('.pdf-table')
+    if (!table) return
+
+    const naturalWidth = table.offsetWidth
+    const availWidth = 730 // 与容器宽度一致（A4 内容区）
+
+    if (naturalWidth > availWidth && naturalWidth > 0) {
+      const scale = availWidth / naturalWidth
+      const naturalHeight = table.offsetHeight
+      table.style.transform = `scale(${scale})`
+      table.style.transformOrigin = 'top left'
+      // transform 不改变布局尺寸，手动把包裹层压到缩放后的高度
+      wrap.style.width = `${availWidth}px`
+      wrap.style.height = `${Math.ceil(naturalHeight * scale)}px`
+    }
+  })
+
+  // 处理表格超宽缩放（包括合并导出中的表格）
+  fitWideTables(container, 730)
+
+  const safeName = (filename || 'AI回复_合并导出').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60)
+
+  try {
+    await html2pdf()
+      .set({
+        margin: [18, 18, 20, 18],
+        filename: `${safeName}.pdf`,
+        image: { type: 'jpeg', quality: 0.96 },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          windowWidth: 766,
+        },
+        jsPDF: { unit: 'pt', format: 'a4', orientation: 'portrait' },
+        pagebreak: { mode: ['css', 'legacy'] },
+      })
+      .from(container.querySelector('.md-pdf-body'))
+      .save()
+  } finally {
+    if (container.parentNode) document.body.removeChild(container)
+  }
+}

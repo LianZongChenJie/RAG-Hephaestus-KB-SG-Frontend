@@ -4,7 +4,7 @@ import { marked } from 'marked'
 import hljs from 'highlight.js'
 import * as echarts from 'echarts'
 import 'highlight.js/styles/github.css'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElLoading } from 'element-plus'
 import { Promotion, VideoPause, Download } from '@element-plus/icons-vue'
 import { useChatStore } from '../stores/chatStore'
 import SettingPanel from './SettingPanel.vue'
@@ -14,6 +14,7 @@ import {
   downloadMarkdownAsPdf,
   downloadTableAsPdf,
   downloadChartAsPdf,
+  downloadCombinedAsPdf,
   looksLikeMarkdown,
 } from '../utils/markdownToPdf'
 
@@ -76,11 +77,21 @@ async function downloadPdf(msg, index) {
   }
   if (!parts.length) return
   const filename = store.currentSession?.title || `AI回复_${index + 1}`
+
+  const loading = ElLoading.service({
+    lock: true,
+    text: '正在生成 PDF...',
+    background: 'rgba(255, 255, 255, 0.7)',
+    customClass: 'smooth-loading'
+  })
+
   try {
     await downloadMarkdownAsPdf(parts.join('\n\n'), filename)
     ElMessage.success('PDF 已开始下载')
   } catch (err) {
     ElMessage.error('导出失败：' + (err.message || '未知错误'))
+  } finally {
+    loading.close()
   }
 }
 
@@ -88,11 +99,21 @@ async function downloadPdf(msg, index) {
 async function downloadTablePdf(msg, index) {
   if (!msg?.table?.columns?.length) return
   const base = store.currentSession?.title || `AI回复_${index + 1}`
+
+  const loading = ElLoading.service({
+    lock: true,
+    text: '正在生成表格 PDF...',
+    background: 'rgba(255, 255, 255, 0.7)',
+    customClass: 'smooth-loading'
+  })
+
   try {
     await downloadTableAsPdf(msg.table.columns, msg.table.rows || [], `${base}_数据表`, base)
     ElMessage.success('PDF 已开始下载')
   } catch (err) {
     ElMessage.error('导出失败：' + (err.message || '未知错误'))
+  } finally {
+    loading.close()
   }
 }
 
@@ -100,6 +121,14 @@ async function downloadTablePdf(msg, index) {
 async function downloadChartPdf(msg, index) {
   if (!msg?.chart?.option) return
   const base = store.currentSession?.title || `AI回复_${index + 1}`
+
+  const loading = ElLoading.service({
+    lock: true,
+    text: '正在生成图表 PDF...',
+    background: 'rgba(255, 255, 255, 0.7)',
+    customClass: 'smooth-loading'
+  })
+
   try {
     const root = listRef.value
     const canvas = root?.querySelector(`[data-chart-index="${index}"] .result-chart__canvas`)
@@ -114,6 +143,89 @@ async function downloadChartPdf(msg, index) {
     ElMessage.success('PDF 已开始下载')
   } catch (err) {
     ElMessage.error('导出失败：' + (err.message || '未知错误'))
+  } finally {
+    loading.close()
+  }
+}
+
+/** 检查消息是否包含多个可下载内容 */
+function hasMultipleDownloadableContents(msg) {
+  let count = 0
+  if (msg?.table?.columns?.length) count++
+  if (msg?.chart?.option) count++
+  if (msg?.content && looksLikeMarkdown(msg.content)) count++
+  return count >= 2
+}
+
+/** 获取图表的数据URL */
+async function getChartDataUrl(msg, index) {
+  if (!msg?.chart?.option) return null
+  const root = listRef.value
+  const canvas = root?.querySelector(`[data-chart-index="${index}"] .result-chart__canvas`)
+  const chart = canvas ? echarts.getInstanceByDom(canvas) : null
+  if (!chart) return null
+  return chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+}
+
+/** 合并导出：将消息中的所有可下载内容合并到一个PDF中 */
+async function downloadCombinedPdf(msg, index) {
+  const base = store.currentSession?.title || `AI回复_${index + 1}`
+
+  const loading = ElLoading.service({
+    lock: true,
+    text: '正在生成合并 PDF...',
+    background: 'rgba(255, 255, 255, 0.7)',
+    customClass: 'smooth-loading'
+  })
+
+  try {
+    // 收集所有可下载的内容
+    const content = {
+      text: msg?.content || '',
+      tables: [],
+      charts: []
+    }
+
+    // 添加表格
+    if (msg?.table?.columns?.length) {
+      content.tables.push({
+        columns: msg.table.columns,
+        rows: msg.table.rows || [],
+        title: `${base}_数据表`
+      })
+    }
+
+    // 添加图表
+    if (msg?.chart?.option) {
+      const chartDataUrl = await getChartDataUrl(msg, index)
+      if (chartDataUrl) {
+        content.charts.push({
+          imageDataUrl: chartDataUrl,
+          title: msg.chart.option?.title?.text || `${base}_图表`
+        })
+      } else {
+        ElMessage.warning('图表尚未渲染完成，请稍后重试')
+        return
+      }
+    }
+
+    // 检查是否有可导出的内容
+    if (!content.text.trim() && content.tables.length === 0 && content.charts.length === 0) {
+      ElMessage.warning('没有可导出的内容')
+      return
+    }
+
+    await downloadCombinedAsPdf({
+      text: content.text,
+      tables: content.tables,
+      charts: content.charts,
+      filename: `${base}_合并导出`
+    })
+    ElMessage.success('PDF 已开始下载')
+  } catch (err) {
+    ElMessage.error('导出失败：' + (err.message || '未知错误'))
+  } finally {
+    loading.close()
   }
 }
 
@@ -343,6 +455,18 @@ onUnmounted(() => {
             </a>
           </div>
 
+          <!-- 合并导出按钮 -->
+          <a
+            v-if="msg.role === 'assistant' && !isStreamingAssistant(index) && hasMultipleDownloadableContents(msg)"
+            class="pdf-link pdf-link-combined"
+            href="javascript:void(0)"
+            title="将所有内容合并导出为一个 PDF"
+            @click.prevent="downloadCombinedPdf(msg, index)"
+          >
+            <el-icon><Download /></el-icon>
+            合并导出 PDF
+          </a>
+
           <div
             v-if="msg.role === 'assistant' && store.isGenerating && index === messages.length - 1 && !msg.content && !msg.table && !msg.chart"
             class="typing"
@@ -558,6 +682,14 @@ onUnmounted(() => {
 .pdf-link .el-icon {
   font-size: 14px;
 }
+.pdf-link-combined {
+  margin-top: 8px;
+  font-weight: 500;
+  color: #67c23a;
+}
+.pdf-link-combined:hover {
+  color: #85ce61;
+}
 .stream-cursor {
   display: inline-block;
   width: 2px;
@@ -640,5 +772,42 @@ onUnmounted(() => {
 }
 .copy-code-btn:hover {
   background: rgba(255, 255, 255, 0.25);
+}
+
+/* 顺滑Loading动画 - 完全控制，确保只有圆圈旋转，文字静止 */
+.smooth-loading {
+  .el-loading-mask {
+    background: rgba(255, 255, 255, 0.7) !important;
+  }
+  .el-loading-spinner {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    animation: none !important;
+    transform: none !important;
+  }
+  .el-loading-spinner svg {
+    display: block;
+    animation: smooth-rotate 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+  }
+  .el-loading-spinner .el-loading-text {
+    display: block !important;
+    margin-top: 16px !important;
+    animation: none !important;
+    transform: none !important;
+    color: #409eff !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+  }
+}
+
+@keyframes smooth-rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 </style>
